@@ -134,6 +134,15 @@
             <artifactId>aspectjweaver</artifactId>
             <version>1.9.19</version>
         </dependency>
+		<dependency>
+		    <groupId>org.jetbrains.pty4j</groupId>
+		    <artifactId>pty4j</artifactId>
+		    <version>0.12.11</version>
+		</dependency>
+		<dependency>
+		    <groupId>org.apache.httpcomponents</groupId>
+		    <artifactId>httpclient</artifactId>
+		</dependency>
     </dependencies>
 
     <repositories>

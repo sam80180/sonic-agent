@@ -29,7 +29,10 @@ public class WebSocketSessionMap {
     }
 
     public static void removeSession(@NonNull Session session) {
-        removeSession(session.getUserProperties().get("id").toString());
+    	final Object id = session.getUserProperties().get("id");
+    	if (id!=null) {
+    		removeSession(id.toString());
+    	}
     }
 
     public static void removeSession(String sessionId) {

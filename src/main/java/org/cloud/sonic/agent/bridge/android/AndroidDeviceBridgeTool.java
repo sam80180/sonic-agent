@@ -94,7 +94,7 @@ public class AndroidDeviceBridgeTool implements ApplicationListener<ContextRefre
      * @des 获取系统安卓SDK路径
      * @date 2021/8/16 19:35
      */
-    private static String getADBPathFromSystemEnv() {
+    public static String getADBPathFromSystemEnv() {
         String path = System.getenv("ANDROID_HOME");
         if (path != null) {
             path += File.separator + "platform-tools" + File.separator + "adb";

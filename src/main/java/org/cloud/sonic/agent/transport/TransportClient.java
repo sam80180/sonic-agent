@@ -44,6 +44,7 @@ import org.cloud.sonic.agent.tests.handlers.IOSStepHandler;
 import org.cloud.sonic.agent.tests.ios.IOSRunStepThread;
 import org.cloud.sonic.agent.tests.ios.IOSTestTaskBootThread;
 import org.cloud.sonic.agent.tools.*;
+import org.cloud.sonic.agent.websockets.AndroidShellWSServer;
 import org.cloud.sonic.driver.common.tool.SonicRespException;
 import org.java_websocket.client.WebSocketClient;
 import org.java_websocket.handshake.ServerHandshake;
@@ -185,7 +186,7 @@ public class TransportClient extends WebSocketClient {
                 }
                 case "stopDebug" -> {
                     String udId = jsonObject.getString("udId");
-                    List<String> sessionList = Arrays.asList("AndroidWSServer", "AndroidTerminalWSServer", "AndroidScreenWSServer",
+                    List<String> sessionList = Arrays.asList("AndroidWSServer", "AndroidTerminalWSServer", "AndroidScreenWSServer", AndroidShellWSServer.class.getSimpleName(),
                             "AudioWSServer", "IOSWSServer", "IOSTerminalWSServer", "IOSScreenWSServer");
                     for (String ss : sessionList) {
                         Session session = WebSocketSessionMap.getSession(String.format("%s-%s", ss, udId));

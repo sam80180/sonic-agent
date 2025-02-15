@@ -34,162 +34,180 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
-
-import static org.cloud.sonic.agent.tools.BytesTool.sendText;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 @Slf4j
 @Component
 public class AndroidSupplyTool implements ApplicationListener<ContextRefreshedEvent> {
-    private static File sasBinary = new File("plugins" + File.separator + "sonic-android-supply");
-    private static String sas = sasBinary.getAbsolutePath();
+    private static final File sasBinary = new File("plugins" + File.separator + "sonic-android-supply");
+    private static final String sas = sasBinary.getAbsolutePath();
 
+    private static final Map<String, Thread> perfmonThreads = new ConcurrentHashMap<>();
     @Override
     public void onApplicationEvent(@NonNull ContextRefreshedEvent event) {
         log.info("Enable sonic-android-supply Module");
     }
 
     public static void startShare(String udId, Session session) {
+        executeShare(udId, session, PortTool.getPort());
+    }
+
+    public static void startShare(String udId, int port) {
+        executeShare(udId, null, port);
+    }
+
+    private static void executeShare(String udId, Session session, int port) {
         JSONObject sasJSON = new JSONObject();
         sasJSON.put("msg", "sas");
         sasJSON.put("isEnable", true);
         stopShare(udId);
         String processName = String.format("process-%s-sas", udId);
-        String commandLine = "%s share -s %s --translate-port %d";
+        String commandLine = String.format("%s share -s %s --translate-port %d", sas, udId, port);
         try {
-            String system = System.getProperty("os.name").toLowerCase();
-            Process ps = null;
-            int port = PortTool.getPort();
-            if (system.contains("win")) {
-                ps = Runtime.getRuntime().exec(new String[]{"cmd", "/c", String.format(commandLine, sas, udId, port)});
-            } else if (system.contains("linux") || system.contains("mac")) {
-                ps = Runtime.getRuntime().exec(new String[]{"sh", "-c", String.format(commandLine, sas, udId, port)});
-            }
+            Process ps = executeCommand(commandLine);
             GlobalProcessMap.getMap().put(processName, ps);
             sasJSON.put("port", port);
-        } catch (Exception e) {
+        } catch (IOException e) {
+            log.error("Error starting Android share", e);
             sasJSON.put("port", 0);
-            e.printStackTrace();
         } finally {
-            BytesTool.sendText(session, sasJSON.toJSONString());
-        }
-    }
-
-    public static void startShare(String udId, int port) {
-        stopShare(udId);
-        String processName = String.format("process-%s-sas", udId);
-        String commandLine = "%s share -s %s --translate-port %d";
-        try {
-            String system = System.getProperty("os.name").toLowerCase();
-            Process ps = null;
-            if (system.contains("win")) {
-                ps = Runtime.getRuntime().exec(new String[]{"cmd", "/c", String.format(commandLine, sas, udId, port)});
-            } else if (system.contains("linux") || system.contains("mac")) {
-                ps = Runtime.getRuntime().exec(new String[]{"sh", "-c", String.format(commandLine, sas, udId, port)});
+            if (session != null) {
+                BytesTool.sendText(session, sasJSON.toJSONString());
             }
-            GlobalProcessMap.getMap().put(processName, ps);
-        } catch (Exception e) {
-            e.printStackTrace();
         }
     }
 
     public static void stopShare(String udId) {
-        String processName = String.format("process-%s-sas", udId);
-        if (GlobalProcessMap.getMap().get(processName) != null) {
-            Process ps = GlobalProcessMap.getMap().get(processName);
-            ps.children().forEach(ProcessHandle::destroy);
-            ps.destroy();
-        }
+        terminateProcess(String.format("process-%s-sas", udId));
     }
 
     public static void stopPerfmon(String udId) {
-        String processName = String.format("process-%s-perfmon", udId);
-        if (GlobalProcessMap.getMap().get(processName) != null) {
-            Process ps = GlobalProcessMap.getMap().get(processName);
-            ps.children().forEach(ProcessHandle::destroy);
-            ps.destroy();
+        // 中断并移除性能监控线程
+        Thread perfmonThread = perfmonThreads.get(udId);
+        if (perfmonThread != null) {
+            perfmonThread.interrupt(); // 中断线程
+            perfmonThreads.remove(udId); // 移除线程
+        }
+        terminateProcess(String.format("process-%s-perfmon", udId));
+    }
+
+    private static void terminateProcess(String processName) {
+        Process ps = GlobalProcessMap.getMap().get(processName);
+        if (ps != null) {
+            ps.children().forEach(ProcessHandle::destroy); // 销毁子进程
+            ps.destroy(); // 销毁当前进程
+
+            try {
+                boolean exited = ps.waitFor(5, TimeUnit.SECONDS); // 等待进程终止，超时5秒
+                if (!exited) {
+                    ps.destroyForcibly(); // 强制终止
+                }
+            } catch (InterruptedException e) {
+                log.error("Process termination interrupted: ", e);
+                Thread.currentThread().interrupt(); // 重新设置中断状态
+            }
+
+            GlobalProcessMap.getMap().remove(processName); // 从全局映射中移除进程
         }
     }
 
     public static void startPerfmon(String udId, String pkg, Session session, LogUtil logUtil, int interval) {
-        stopPerfmon(udId);
-        Process ps = null;
-        String commandLine = "%s perfmon -s %s -r %d %s -j --sys-cpu --sys-mem --sys-network";
-        String system = System.getProperty("os.name").toLowerCase();
-        String tail = pkg.length() == 0 ? "" : (" --proc-cpu --proc-fps --proc-mem --proc-threads -p " + pkg);
+        stopPerfmon(udId); // 启动前先停止已有监控
+        String processName = String.format("process-%s-perfmon", udId);
+        String commandLine = String.format("%s perfmon -s %s -r %d %s -j --sys-cpu --sys-mem --sys-network", sas, udId, interval, pkg.isEmpty() ? "" : "--proc-cpu --proc-fps --proc-mem --proc-threads -p " + pkg);
+
         try {
-            if (system.contains("win")) {
-                ps = Runtime.getRuntime().exec(new String[]{"cmd", "/c", String.format(commandLine, sas, udId, interval, tail)});
-            } else if (system.contains("linux") || system.contains("mac")) {
-                ps = Runtime.getRuntime().exec(new String[]{"sh", "-c", String.format(commandLine, sas, udId, interval, tail)});
+            Process ps = executeCommand(commandLine);
+            GlobalProcessMap.getMap().put(processName, ps);
+
+            // 启动输出线程并保存
+            Thread perfmonThread = new Thread(() -> {
+                try (BufferedReader stdInput = new BufferedReader(new InputStreamReader(ps.getInputStream()))) {
+                    String line;
+                    while (!Thread.currentThread().isInterrupted() && (line = stdInput.readLine()) != null) {
+                        processPerfmonLine(line, session, logUtil);
+                    }
+                } catch (IOException e) {
+                    // 忽略流关闭的异常
+                    if (!"Stream closed".equals(e.getMessage())) {
+                        log.error("Error reading perfmon output", e);
+                    }
+                }
+            });
+            perfmonThreads.put(udId, perfmonThread);
+            perfmonThread.start(); // 启动输出线程
+
+        } catch (IOException e) {
+            log.error("Error starting performance monitor", e);
+        }
+    }
+
+    private static Process executeCommand(String command) throws IOException {
+        String system = System.getProperty("os.name").toLowerCase();
+        Process process;
+
+        if (system.contains("win")) {
+            process = Runtime.getRuntime().exec(new String[]{"cmd", "/c", command});
+        } else if (system.contains("linux") || system.contains("mac")) {
+            process = Runtime.getRuntime().exec(new String[]{"sh", "-c", command});
+        } else {
+            throw new RuntimeException("Unsupported operating system: " + system);
+        }
+
+        // 打印输出和错误流
+        printProcessOutput(process);
+
+        return process;
+    }
+
+    private static void printProcessOutput(Process process) {
+        // 创建线程打印标准输出
+        new Thread(() -> {
+            try (BufferedReader stdInput = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+                String line;
+                while ((line = stdInput.readLine()) != null) {
+                    log.info("Output: " + line);
+                }
+            } catch (IOException e) {
+                // 忽略流关闭的异常
+                if (!"Stream closed".equals(e.getMessage())) {
+                    log.error("Error reading standard output", e);
+                }
+            }
+        }).start();
+
+        // 创建线程打印错误输出
+        new Thread(() -> {
+            try (BufferedReader stdError = new BufferedReader(new InputStreamReader(process.getErrorStream()))) {
+                String line;
+                while ((line = stdError.readLine()) != null) {
+                    log.error("Error: " + line);
+                }
+            } catch (IOException e) {
+                // 忽略流关闭的异常
+                if (!"Stream closed".equals(e.getMessage())) {
+                    log.error("Error reading error output", e);
+                }
+            }
+        }).start();
+    }
+
+    private static void processPerfmonLine(String line, Session session, LogUtil logUtil) {
+        try {
+            JSONObject perf = JSON.parseObject(line);
+            if (session != null) {
+                JSONObject perfDetail = new JSONObject();
+                perfDetail.put("msg", "perfDetail");
+                perfDetail.put("detail", perf);
+                BytesTool.sendText(session, perfDetail.toJSONString());
+            }
+            if (logUtil != null) {
+                logUtil.sendPerLog(perf.toJSONString());
             }
         } catch (Exception e) {
-            e.printStackTrace();
+            log.error("Error processing performance monitor line", e);
         }
-        InputStreamReader inputStreamReader = new InputStreamReader(ps.getInputStream());
-        BufferedReader stdInput = new BufferedReader(inputStreamReader);
-        InputStreamReader err = new InputStreamReader(ps.getErrorStream());
-        BufferedReader stdInputErr = new BufferedReader(err);
-        Thread psErr = new Thread(() -> {
-            String s;
-            while (true) {
-                try {
-                    if ((s = stdInputErr.readLine()) == null) break;
-                } catch (IOException e) {
-                    log.info(e.getMessage());
-                    break;
-                }
-                log.info(s);
-            }
-            try {
-                stdInputErr.close();
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-            try {
-                err.close();
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-            log.info("perfmon print thread shutdown.");
-        });
-        psErr.start();
-        Thread pro = new Thread(() -> {
-            String s;
-            while (true) {
-                try {
-                    if ((s = stdInput.readLine()) == null) break;
-                } catch (IOException e) {
-                    log.info(e.getMessage());
-                    break;
-                }
-                try {
-                    JSONObject perf = JSON.parseObject(s);
-                    if (session != null) {
-                        JSONObject perfDetail = new JSONObject();
-                        perfDetail.put("msg", "perfDetail");
-                        perfDetail.put("detail", perf);
-                        sendText(session, perfDetail.toJSONString());
-                    }
-                    if (logUtil != null) {
-                        logUtil.sendPerLog(perf.toJSONString());
-                    }
-                } catch (Exception ignored) {
-                }
-            }
-            try {
-                stdInput.close();
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-            try {
-                inputStreamReader.close();
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-            log.info("perfmon print thread shutdown.");
-        });
-        pro.start();
-        String processName = String.format("process-%s-perfmon", udId);
-        GlobalProcessMap.getMap().put(processName, ps);
     }
 }
